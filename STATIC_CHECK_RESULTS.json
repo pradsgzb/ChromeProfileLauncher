@@ -1,0 +1,16 @@
+{
+  "scope": "Supplemental Python source/algorithm checks only; PowerShell and Windows were NOT executed.",
+  "lexically_checked_files": [
+    "Validate.ps1",
+    "chrome.ps1",
+    "tests/Chrome.Tests.ps1",
+    "PSScriptAnalyzerSettings.psd1"
+  ],
+  "single_argument_model_cases_passed": 20014,
+  "multi_argument_model_cases_passed": 5000,
+  "batch_model_cases_passed": 600,
+  "source_regression_assertions_passed": 9,
+  "pester_execution": "NOT RUN",
+  "psscriptanalyzer_execution": "NOT RUN",
+  "windows_chrome_integration": "NOT RUN"
+}

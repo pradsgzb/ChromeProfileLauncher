@@ -7,8 +7,10 @@
     With neither -Run nor -RunAll, prints commands without starting or closing Chrome.
     -Run asks before the first five profiles, then offers 5/10/15/20/all/quit.
     -RunAll submits every selected launch without prompts or an intentional delay.
-    -WhatIf always prevents browser changes. Nothing edits Chrome's Local State file,
-    deletes profiles, disables browser security, or forcibly terminates processes.
+    -WhatIf always prevents browser changes. Each launched profile opens a self-contained
+    identification tab first so the temporary folder is visible in the active tab/window title.
+    Nothing edits Chrome's Local State file, deletes profiles, disables browser security,
+    or forcibly terminates processes.
 
     Standard: existing profiles inside one Chrome user-data directory.
     Temp: one profile per immediate child user-data directory under -TempDir.
@@ -51,6 +53,10 @@
     Optional replacement URLs. Only absolute HTTP/HTTPS URLs and about:blank are accepted.
     Temp defaults: Gemini, ChatGPT, SeaArt. Standard defaults: a new blank tab.
     Pass -Urls @() from PowerShell for a blank tab in either launch mode.
+.PARAMETER NoProfileIdentifierTab
+    Disables the identification tab that is normally opened first in each launched window.
+    By default the tab title is "PROFILE - <temporary-folder-name>" and the page shows
+    the temporary folder, user-data directory, internal profile directory, and full profile path.
 .PARAMETER LaunchDelayMilliseconds
     Delay BETWEEN launches within a batch. Default: 500 with -Run, zero with -RunAll.
     An explicitly supplied value is honored in either mode. This is not a load wait.
@@ -79,7 +85,7 @@
 .EXAMPLE
     .\chrome.ps1 Close -Run
 .NOTES
-    Version: 2.0.1
+    Version: 2.1.0
     Invoke this script normally; do not dot-source it into your interactive profile.
     Re-running the same selection may open duplicate windows/tabs.
 #>
@@ -144,6 +150,8 @@ param(
 
     [AllowEmptyCollection()]
     [string[]]$Urls,
+
+    [switch]$NoProfileIdentifierTab,
 
     [ValidateRange(0, 60000)]
     [int]$LaunchDelayMilliseconds = 500,
@@ -486,6 +494,64 @@ function Get-ChromeUrl {
     }
 }
 
+function ConvertTo-ChromeHtmlText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+
+    # System.Net.WebUtility is available in Windows PowerShell 5.1/.NET Framework and
+    # PowerShell 7. Encode every user-derived value before inserting it into HTML.
+    return [System.Net.WebUtility]::HtmlEncode($Value)
+}
+
+function New-ChromeProfileIdentifierUrl {
+    [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Pure string factory; no persistent or external state is changed.'
+    )]
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory = $true)][pscustomobject]$ProfileRecord)
+
+    $folderName = [string]$ProfileRecord.Folder
+    $userDataDir = [string]$ProfileRecord.UserDataDir
+    $profileDirectory = [string]$ProfileRecord.ProfileDirectory
+    $fullProfilePath = Join-Path -Path $userDataDir -ChildPath $profileDirectory
+
+    $encodedFolder = ConvertTo-ChromeHtmlText -Value $folderName
+    $encodedUserData = ConvertTo-ChromeHtmlText -Value $userDataDir
+    $encodedProfileDirectory = ConvertTo-ChromeHtmlText -Value $profileDirectory
+    $encodedFullProfilePath = ConvertTo-ChromeHtmlText -Value $fullProfilePath
+
+    # Keep the document self-contained. A data: URL avoids writing helper files into
+    # the profile or filesystem and therefore cannot become stale when folders move.
+    $html = @"
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PROFILE - $encodedFolder</title>
+<style>
+body{font-family:Segoe UI,Arial,sans-serif;margin:0;background:#f5f7fa;color:#1f2328}
+main{max-width:960px;margin:48px auto;padding:32px;background:white;border:1px solid #d0d7de;border-radius:12px;box-shadow:0 4px 18px rgba(31,35,40,.08)}
+h1{margin-top:0;font-size:32px} .label{font-weight:600;margin-top:20px}.value{font-family:Consolas,monospace;font-size:17px;padding:12px;background:#f6f8fa;border-radius:6px;overflow-wrap:anywhere}
+.note{margin-top:28px;color:#57606a}
+</style>
+</head>
+<body><main>
+<h1>Chrome Profile: $encodedFolder</h1>
+<div class="label">Temporary folder</div><div class="value">$encodedFolder</div>
+<div class="label">User data directory</div><div class="value">$encodedUserData</div>
+<div class="label">Internal profile directory</div><div class="value">$encodedProfileDirectory</div>
+<div class="label">Full profile path</div><div class="value">$encodedFullProfilePath</div>
+<div class="note">Keep this tab open when you want the Chrome window title to identify the temporary profile.</div>
+</main></body></html>
+"@
+
+    return 'data:text/html;charset=utf-8,' + [System.Uri]::EscapeDataString($html)
+}
+
 function New-ChromeLaunchPlan {
     [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute(
         'PSUseShouldProcessForStateChangingFunctions', '',
@@ -497,15 +563,23 @@ function New-ChromeLaunchPlan {
         [Parameter(Mandatory = $true)][pscustomobject]$ProfileRecord,
         [Parameter(Mandatory = $true)][string]$Executable,
         [AllowEmptyCollection()][string[]]$LaunchUrls,
-        [Parameter(Mandatory = $true)][int]$Index
+        [Parameter(Mandatory = $true)][int]$Index,
+        [bool]$IncludeProfileIdentifierTab = $true
     )
+
+    $effectiveUrls = [System.Collections.Generic.List[string]]::new()
+    if ($IncludeProfileIdentifierTab) {
+        $effectiveUrls.Add((New-ChromeProfileIdentifierUrl -ProfileRecord $ProfileRecord))
+    }
+    foreach ($url in @($LaunchUrls)) { $effectiveUrls.Add($url) }
+
     $nativeArguments = @(
         '--user-data-dir=' + $ProfileRecord.UserDataDir
         '--profile-directory=' + $ProfileRecord.ProfileDirectory
         '--new-window'
         '--no-first-run'
         '--no-default-browser-check'
-    ) + @($LaunchUrls)
+    ) + @($effectiveUrls)
     $argumentLine = ($nativeArguments | ForEach-Object { ConvertTo-ChromeNativeArgument -Value $_ }) -join ' '
     # Preview uses Start-Process as well, avoiding PS 5.1 / PS 7 native & quoting differences.
     $command = 'Start-Process -FilePath {0} -ArgumentList {1} -ErrorAction Stop' -f
@@ -515,6 +589,7 @@ function New-ChromeLaunchPlan {
         Index = $Index; Mode = $ProfileRecord.Mode; DisplayName = $ProfileRecord.DisplayName
         UserDataDir = $ProfileRecord.UserDataDir; ProfileDirectory = $ProfileRecord.ProfileDirectory
         Executable = $Executable; Arguments = $nativeArguments; ArgumentLine = $argumentLine
+        ProfileIdentifierTab = $IncludeProfileIdentifierTab
         Command = $command
     }
 }
@@ -763,7 +838,7 @@ $validatedUrls = @(Get-ChromeUrl -Values $Urls)
 if ($validatedUrls.Count -eq 0) { $validatedUrls = @('about:blank') }
 $plans = @(
     for ($index = 0; $index -lt $selectedProfiles.Count; $index++) {
-        New-ChromeLaunchPlan -ProfileRecord $selectedProfiles[$index] -Executable $executable -LaunchUrls $validatedUrls -Index ($StartIndex + $index)
+        New-ChromeLaunchPlan -ProfileRecord $selectedProfiles[$index] -Executable $executable -LaunchUrls $validatedUrls -Index ($StartIndex + $index) -IncludeProfileIdentifierTab (-not $NoProfileIdentifierTab)
     }
 )
 Write-ChromeMessage ("Selected {0} profile(s) from {1} matching profile(s). Mode: {2}." -f $plans.Count, $ordered.Count, $Mode)
